@@ -151,17 +151,35 @@ def train_and_evaluate(train_ds, val_ds, device, metrics_dir="metrics", use_samp
         )
 
         # Confusion matrices
-        for idx, label in enumerate(pathology_labels):
-            cm = confusion_matrix(y_true_arr[:, idx], y_pred_arr[:, idx])
-            plt.figure(figsize=(4, 4))
-            plt.imshow(cm, interpolation='nearest')
-            plt.title(f"Confusion {label} - Epoch {epoch}")
-            plt.colorbar()
-            plt.xticks([0, 1]); plt.yticks([0, 1])
-            plt.xlabel("Pred"); plt.ylabel("True")
-            plt.tight_layout()
-            plt.savefig(os.path.join(metrics_dir, f"conf_{label}_epoch_{epoch}.png"))
-            plt.close()
+        # --- Matrice de confusion agrégée sur toutes les classes ---
+        from sklearn.metrics import confusion_matrix
+
+        # Aplatir tous les labels (« multilabel » → binaire global)
+        y_true_flat = y_true_arr.ravel()
+        y_pred_flat = y_pred_arr.ravel()
+
+        cm_all = confusion_matrix(y_true_flat, y_pred_flat)
+        plt.figure(figsize=(6, 6))
+        plt.imshow(cm_all, interpolation='nearest', cmap=plt.cm.Blues)
+        plt.title(f"Confusion matrix (toutes classes) - Epoch {epoch}")
+        plt.colorbar()
+
+        tick_labels = ['Négatif', 'Positif']
+        plt.xticks([0, 1], tick_labels)
+        plt.yticks([0, 1], tick_labels)
+        plt.xlabel("Prédit")
+        plt.ylabel("Vrai")
+
+        # Annoter les cellules
+        for i in range(cm_all.shape[0]):
+            for j in range(cm_all.shape[1]):
+                plt.text(j, i, format(cm_all[i, j], 'd'),
+                        ha='center', va='center')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(metrics_dir, f"conf_all_classes_epoch_{epoch}.png"))
+        plt.close()
+
 
         # Loss curves
         save_plot(
