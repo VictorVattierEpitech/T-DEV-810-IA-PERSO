@@ -11,15 +11,15 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from config import pathology_labels, global_epochs, batch_size, learning_rate_global
 from model import CheXpertModel
 
-
 def compute_pos_weights(dataset, batch_size=256, device='cpu'):
     """
-    Parcourt le dataset pour calculer pos_weight = #neg / #pos par classe.
+    Estime le pos_weight pour chaque classe : num_neg / num_pos.
+    Affiche une barre de progression.
     """
     counts = np.zeros(len(pathology_labels), dtype=np.float64)
     total = 0
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    for _, labels in tqdm(loader, desc="→ pos_weights", leave=True):
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    for _, labels in tqdm(loader, desc="Computing pos_weights"):
         batch = torch.stack([labels[c] for c in pathology_labels], dim=1).numpy()
         counts += batch.sum(axis=0)
         total += batch.shape[0]
@@ -27,142 +27,154 @@ def compute_pos_weights(dataset, batch_size=256, device='cpu'):
     pos_weights = neg / (counts + 1e-6)
     return torch.tensor(pos_weights, dtype=torch.float32).to(device)
 
-
 def save_plot(x, ys, labels, title, xlabel, ylabel, save_path):
-    """Trace un graphique et le sauve sur disque."""
+    """
+    Trace et sauvegarde un graphique de plusieurs courbes.
+      x : liste d'abscisses
+      ys : liste de listes (chaque liste de même longueur que x)
+      labels : noms des courbes
+    """
     plt.figure()
-    for y, label in zip(ys, labels):
-        plt.plot(x, y, label=label)
+    for y_vals, lab in zip(ys, labels):
+        plt.plot(x, y_vals, label=lab)
     plt.title(title)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
-    plt.legend()
+    plt.legend(loc='best')
     plt.savefig(save_path)
     plt.close()
 
-
 def train_and_evaluate(train_ds, val_ds, device, metrics_dir="metrics", use_sampler=True):
+    """
+    Entraîne et évalue le modèle. Trace loss, AUC et matrices de confusion après chaque epoch.
+    Sauvegarde 'last.pt' et 'best.pt' dans metrics_dir.
+    """
     os.makedirs(metrics_dir, exist_ok=True)
-    print(f"[train] Start training: {global_epochs} epochs", flush=True)
 
-    # 1) Loss pondérée
+    # 1) Pos_weights et criterion
     pos_weights = compute_pos_weights(train_ds, device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weights)
 
-    # 2) DataLoader avec sampler ou shuffle
+    # 2) DataLoaders
     if use_sampler:
         pw = pos_weights.cpu().numpy()
         weights = []
-        for _, labels in train_ds:
+        for _, labels in tqdm(train_ds, desc="Computing sample weights"):
             lab = np.array([labels[c] for c in pathology_labels], dtype=np.float32)
             w = (lab * pw).sum() / (lab.sum() + 1e-6)
             weights.append(w + 1.0)
         sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-        train_loader = DataLoader(train_ds, batch_size=batch_size,
-                                  sampler=sampler, num_workers=0)
-        print("[train] Using WeightedRandomSampler", flush=True)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=4)
     else:
-        train_loader = DataLoader(train_ds, batch_size=batch_size,
-                                  shuffle=True, num_workers=0)
-
-    val_loader = DataLoader(val_ds, batch_size=batch_size,
-                            shuffle=False, num_workers=0)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4)
 
     # 3) Modèle, optimiseur, scheduler
-    model = CheXpertModel(dropout_prob=0.5).to(device)
+    model     = CheXpertModel(dropout_prob=0.5).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate_global)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2, verbose=True
-    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
-    # 4) Boucle d'entraînement
+    # 4) Historique + best checkpoint
     train_losses, val_losses = [], []
-    for epoch in range(1, global_epochs + 1):
-        print(f"\n=== Epoch {epoch}/{global_epochs} ===", flush=True)
+    auc_history = {label: [] for label in pathology_labels}
+    best_val_loss = float('inf')
 
-        # --- Entraînement ---
+    # 5) Boucle d'entraînement
+    for epoch in range(1, global_epochs + 1):
+        # --- Train ---
         model.train()
         running_loss = 0.0
-        train_loop = tqdm(train_loader, desc=f"Train  {epoch}/{global_epochs}", leave=True)
-        for i, (images, labels) in enumerate(train_loop, 1):
+        for images, labels in tqdm(train_loader, desc=f"Train Epoch {epoch}/{global_epochs}"):
             images = images.to(device)
             y_true = torch.stack([labels[c] for c in pathology_labels], dim=1).float().to(device)
 
             optimizer.zero_grad()
-            raw = model(images)
-            # Concatène si le modèle renvoie un dict label→(B,1)
-            if isinstance(raw, dict):
-                logits = torch.cat([raw[c] for c in pathology_labels], dim=1)
+            outputs = model(images)
+            if isinstance(outputs, dict):
+                logits = torch.stack([outputs[c].squeeze(-1) for c in pathology_labels], dim=1)
             else:
-                logits = raw
+                logits = outputs
+
             loss = criterion(logits, y_true)
             loss.backward()
             optimizer.step()
-
             running_loss += loss.item()
-            train_loop.set_postfix(loss=f"{running_loss/i:.4f}")
 
-        train_losses.append(running_loss / len(train_loader))
+        train_loss = running_loss / len(train_loader)
+        train_losses.append(train_loss)
 
         # --- Validation ---
         model.eval()
-        running_val = 0.0
-        all_true, all_prob = [], []
-        val_loop = tqdm(val_loader, desc=f"Valid  {epoch}/{global_epochs}", leave=True)
-        for j, (images, labels) in enumerate(val_loop, 1):
+        running_val_loss = 0.0
+        all_y_true, all_y_prob = [], []
+        for images, labels in tqdm(val_loader, desc=f"Val Epoch {epoch}/{global_epochs}"):
             images = images.to(device)
             y_true = torch.stack([labels[c] for c in pathology_labels], dim=1).float().to(device)
+            with torch.no_grad():
+                outputs = model(images)
+                if isinstance(outputs, dict):
+                    logits = torch.stack([outputs[c].squeeze(-1) for c in pathology_labels], dim=1)
+                else:
+                    logits = outputs
 
-            raw = model(images)
-            if isinstance(raw, dict):
-                logits = torch.cat([raw[c] for c in pathology_labels], dim=1)
-            else:
-                logits = raw
             loss = criterion(logits, y_true)
+            running_val_loss += loss.item()
+            all_y_true.append(y_true.cpu().numpy())
+            all_y_prob.append(torch.sigmoid(logits).cpu().numpy())
 
-            running_val += loss.item()
-            val_loop.set_postfix(val_loss=f"{running_val/j:.4f}")
+        val_loss = running_val_loss / len(val_loader)
+        val_losses.append(val_loss)
 
-            all_true.append(y_true.cpu().numpy())
-            all_prob.append(torch.sigmoid(logits).cpu().numpy())
+        # --- Checkpoints ---
+        torch.save(model.state_dict(), os.path.join(metrics_dir, 'last.pt'))
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), os.path.join(metrics_dir, 'best.pt'))
 
-        val_losses.append(running_val / len(val_loader))
-
-        # --- Metrics ---
-        y_true_arr = np.concatenate(all_true, axis=0)
-        y_prob_arr = np.concatenate(all_prob, axis=0)
+        # --- Metrics & plots ---
+        y_true_arr = np.concatenate(all_y_true, axis=0)
+        y_prob_arr = np.concatenate(all_y_prob, axis=0)
         y_pred_arr = (y_prob_arr >= 0.5).astype(int)
 
         # AUC
         aucs = roc_auc_score(y_true_arr, y_prob_arr, average=None)
+        for idx, label in enumerate(pathology_labels):
+            auc_history[label].append(aucs[idx])
         save_plot(
-            x=list(range(1, epoch+1)), ys=[aucs], labels=pathology_labels,
-            title=f"Epoch {epoch} AUC", xlabel="Epoch", ylabel="AUC",
-            save_path=os.path.join(metrics_dir, f"epoch_{epoch}_auc.png")
+            x=list(range(1, epoch + 1)),
+            ys=[auc_history[label] for label in pathology_labels],
+            labels=pathology_labels,
+            title="AUC par classe",
+            xlabel="Epoch",
+            ylabel="AUC",
+            save_path=os.path.join(metrics_dir, f"auc_curve_epoch_{epoch}.png")
         )
 
-        # Matrices de confusion
+        # Confusion matrices
         for idx, label in enumerate(pathology_labels):
             cm = confusion_matrix(y_true_arr[:, idx], y_pred_arr[:, idx])
-            plt.figure()
+            plt.figure(figsize=(4, 4))
             plt.imshow(cm, interpolation='nearest')
-            plt.title(f"CM {label} - Epoch {epoch}")
+            plt.title(f"Confusion {label} - Epoch {epoch}")
             plt.colorbar()
-            plt.xticks([0,1]); plt.yticks([0,1])
-            plt.xlabel("Predicted"); plt.ylabel("True")
-            plt.savefig(os.path.join(metrics_dir, f"epoch_{epoch}_cm_{label}.png"))
+            plt.xticks([0, 1]); plt.yticks([0, 1])
+            plt.xlabel("Pred"); plt.ylabel("True")
+            plt.tight_layout()
+            plt.savefig(os.path.join(metrics_dir, f"conf_{label}_epoch_{epoch}.png"))
             plt.close()
 
-        # Courbe de loss
+        # Loss curves
         save_plot(
-            x=list(range(1, epoch+1)),
+            x=list(range(1, epoch + 1)),
             ys=[train_losses, val_losses],
             labels=["Train Loss", "Val Loss"],
-            title="Loss Curve", xlabel="Epoch", ylabel="Loss",
-            save_path=os.path.join(metrics_dir, f"epoch_{epoch}_loss.png")
+            title="Loss",
+            xlabel="Epoch",
+            ylabel="Loss",
+            save_path=os.path.join(metrics_dir, f"loss_curve_epoch_{epoch}.png")
         )
 
-        print(f"[Epoch {epoch}] Train: {train_losses[-1]:.4f} | Val: {val_losses[-1]:.4f}", flush=True)
-        scheduler.step(val_losses[-1])
+        print(f"Epoch {epoch}/{global_epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        scheduler.step(val_loss)
 
     return model
