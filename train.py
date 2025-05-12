@@ -6,7 +6,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import OneCycleLR
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
+
 import config
 from data import get_dataloaders
 from model import get_model
@@ -31,25 +33,66 @@ class MaskedFocalLoss(nn.Module):
         else:
             return loss.sum()
 
-# Setup
+# Setup des dossiers et du logger
 OUTPUT_DIR = 'outputs'
 FIGURES_DIR = os.path.join(OUTPUT_DIR, 'figures')
 os.makedirs(FIGURES_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
-    handlers=[logging.FileHandler(os.path.join(OUTPUT_DIR, 'train.log')), logging.StreamHandler()]
+    handlers=[
+        logging.FileHandler(os.path.join(OUTPUT_DIR, 'train.log')),
+        logging.StreamHandler()
+    ]
 )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = get_model().to(device)
-train_loader, val_loader, _, train_ds = get_dataloaders()
 
-# Calcul des pos/neg en excluant -1
-d_labels = train_ds.labels.numpy()
-d_mask   = train_ds.mask.numpy()
-pos = ((d_labels == 1) & (d_mask == 1)).sum(axis=0)
-neg = ((d_labels == 0) & (d_mask == 1)).sum(axis=0)
+# Chargement des DataLoaders et du dataset
+_, val_loader, _, train_ds = get_dataloaders()
+
+# === OVERSAMPLING CIBLÉ ===
+# 1. Récupérer labels et mask
+labels_np = train_ds.labels.numpy()   # shape (N, C), valeurs {0,1}
+mask_np   = train_ds.mask.numpy()     # shape (N, C), 1 si label valide
+
+# 2. Facteurs d’oversampling pour les classes rares
+oversample_factors = {
+    "Atelectasis":               10.0,
+    "Pneumothorax":               5.0,
+    "Enlarged Cardiomediastinum": 3.0,
+}
+
+# 3. Initialiser poids uniformes
+N = len(train_ds)
+sample_weights = np.ones(N, dtype=np.float32)
+
+# 4. Appliquer les facteurs aux échantillons positifs valides
+for cls, factor in oversample_factors.items():
+    j = config.CLASSES.index(cls)
+    positives = (labels_np[:, j] == 1) & (mask_np[:, j] == 1)
+    sample_weights[positives] *= factor
+
+# 5. Construire le sampler
+sampler = WeightedRandomSampler(
+    weights=sample_weights,
+    num_samples=N,
+    replacement=True
+)
+
+# 6. Recréer le train_loader avec sampler
+train_loader = DataLoader(
+    train_ds,
+    batch_size=config.BATCH_SIZE,
+    sampler=sampler,
+    num_workers=config.NUM_WORKERS,
+    pin_memory=True
+)
+
+# Calcul des pos/neg pour la perte pondérée
+pos = ((labels_np == 1) & (mask_np == 1)).sum(axis=0)
+neg = ((labels_np == 0) & (mask_np == 1)).sum(axis=0)
 pos_weight = torch.tensor(neg / (pos + 1e-6), dtype=torch.float32, device=device)
 
 criterion = MaskedFocalLoss(alpha=pos_weight)
@@ -92,6 +135,7 @@ for epoch in range(1, config.EPOCHS + 1):
             masks.append(mask.numpy())
     val_loss /= len(val_loader.dataset)
 
+    # Calcul des métriques (flatten + mask)
     preds_np = np.vstack(preds) >= 0.5
     trues_np = np.vstack(trues) >= 0.5
     mask_flat = np.vstack(masks).flatten().astype(bool)
@@ -101,8 +145,8 @@ for epoch in range(1, config.EPOCHS + 1):
     acc = (p_flat == t_flat).mean()
     from sklearn.metrics import precision_score, recall_score, f1_score
     prec = precision_score(t_flat, p_flat, average='macro', zero_division=0)
-    rec = recall_score(t_flat, p_flat, average='macro', zero_division=0)
-    f1 = f1_score(t_flat, p_flat, average='macro', zero_division=0)
+    rec  = recall_score   (t_flat, p_flat, average='macro', zero_division=0)
+    f1   = f1_score       (t_flat, p_flat, average='macro', zero_division=0)
 
     history['train_loss'].append(train_loss)
     history['val_loss'].append(val_loss)

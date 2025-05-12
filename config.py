@@ -33,7 +33,7 @@ UNCERTAIN_LABEL_MAPPING = {
     # Les autres seront ignorés par défaut
 }
 
-# Entraînement
+# Training
 EPOCHS       = 10
 BATCH_SIZE   = 300
 NUM_WORKERS  = 12
