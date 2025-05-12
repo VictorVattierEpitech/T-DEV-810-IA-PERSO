@@ -20,7 +20,6 @@ import config
 from data import CheXpertDataset, val_transforms
 from model import get_model
 
-# 📂 Dossiers de sortie
 OUTPUT_DIR = "outputs"
 FIGURES_DIR = os.path.join(OUTPUT_DIR, "figures")
 os.makedirs(FIGURES_DIR, exist_ok=True)

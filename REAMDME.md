@@ -1,25 +1,54 @@
+# T-DEV-810
+
+## Contexte et objectif
+Ce projet vise à construire un **classifieur multi‐labels** pour détecter plusieurs pathologies thoraciques à partir de radiographies de thorax.
+
+Voici les différentes pathologies à identifier : 
+- No Finding
+- Enlarged Cardiomediastinum
+- Cardiomegaly
+- Lung Opacity
+- Lung Lesion
+- Edema
+- Consolidation
+- Pneumonia
+- Atelectasis
+- Pneumothorax
+- Pleural Effusion
+- Pleural Other
+- Fracture
+- Support Devices
+
+## Tâche de classification
+- **Type** : classification **multi‐labels** (une image peut appartenir à plusieurs classes).  
+- **Entrée** : image radiographique (224×224 pixels, RGB)  
+- **Sortie** : vecteur de 14 scores/logits, un par pathologie, convertis en probabilités via une sigmoid.  
+- **Décision** : on applique un seuil (par défaut 0.5 ou optimisé par pathologie) pour chaque probabilité afin de produire un vecteur binaire de pré­dic­tions.
+
+## Dataset : CheXpert
+- **Source** : Stanford CheXpert (Irvin et al., 2019), grand jeu de données de radiographies thoraciques annotées de façon semi‐automatique.  
+- **Taille** :  
+  - Environ **224 316** images d’entraînement (version complète),  
+  - Ici downsampler pour limiter la taille du dataset (+ 400Go normalement)
+  - Lien vers le dataset utilisé : https://www.kaggle.com/datasets/ashery/chexpert
+- **Étiquettes** : 14 catégories cliniques (ex. “No Finding”, “Pneumonia”, “Edema”…).  
+- **Valeurs des labels** :  
+  - `1` = pathologie présente  
+  - `0` = pathologie absente  
+  - `-1` = incertain (annotation douteuse)  
+- **Particularités** :  
+  - Jeu fortement déséquilibré (certaines pathologies très rares)  
+  - Étiquettes produites par extraction automatique de rapports radiologiques, d’où la présence de cas “incertains” à gérer par masquage ou mapping.
+
+## Étude de nos données
+
+## Modèle et architecture (model.py)
 
 
-## Pourquoi ces choix ?
+## Entrainement (config.py et train.py)
 
-1. **DenseNet-121 comme backbone**
 
-   * **Dense Connectivity** : chaque couche reçoit en entrée les sorties de **toutes** les couches précédentes.
-   * **Gradient Flow** renforcé et **réduction** du risque de vanishing gradients.
-   * **Paramètres partagés** et **feature reuse** améliorent l’efficacité, idéal pour des tâches médicales où les motifs sont subtils.
 
-2. **Head MLP sur-mesure**
+## Evaluation
 
-   * Le backbone fournit un embedding riche (`num_ftrs ≈ 1024`).
-   * Pour ajuster à 14 classes, on **diminue** d’abord `num_ftrs → num_ftrs//2` pour alléger la tête et **ajouter** non-linéarité.
-   * **Deux couches** (au lieu d’une simple sortie linéaire) augmentent la capacité du modèle à combiner finement les features extraites.
-
-3. **Dropout 0.5**
-
-   * Taux élevé pour **casser** les corrélations internes et **forcer** le réseau à apprendre des représentations redondantes.
-   * Très utile sur des datasets de taille intermédiaire pour éviter l’overfitting.
-
-4. **ReLU(inplace=True)**
-
-   * Activation **efficace** (rapidité & stabilité numérique).
-   * L’argument `inplace=True` économise de la mémoire en écrasant l’entrée, pratique sur GPU limité.
+## Inférence
