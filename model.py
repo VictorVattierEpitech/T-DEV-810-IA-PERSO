@@ -1,43 +1,25 @@
 # model.py
 
-import torch
 import torch.nn as nn
-import torchvision.models as models
-from config import pathology_labels
+from torchvision import models
+from torchvision.models import DenseNet121_Weights
+import config
 
-class CheXpertModel(nn.Module):
-    """
-    DenseNet-121 backbone + Global Pooling
-    + Dropout → Linear Head → Sigmoid
-    pour classification multi-label sur CheXpert.
-    """
-    def __init__(self,
-                 dropout_prob: float = 0.5):
-        super(CheXpertModel, self).__init__()
-        backbone = models.densenet121(pretrained=True)
-        self.features = backbone.features
-        
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        num_classes = len(pathology_labels)
-        self.dropout = nn.Dropout(dropout_prob)
-        self.classifier = nn.Linear(backbone.classifier.in_features, num_classes)
-        
-    def forward(self, x: torch.Tensor):
-        """
-        Input:
-            x (B, 3, H, W)  — images CheXpert
-        Returns:
-            dict label → (B, 1) probability
-        """
-        x = self.features(x)
-        x = self.global_pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.dropout(x)
-        logits = self.classifier(x)
-        probs  = torch.sigmoid(logits)
-        
-        return {
-            label: probs[:, idx].unsqueeze(1)
-            for idx, label in enumerate(pathology_labels)
-        }
+
+class DenseNet121Classifier(nn.Module):
+    def __init__(self, num_classes=len(config.CLASSES)):
+        super().__init__()
+        weights = DenseNet121_Weights.DEFAULT
+        backbone = models.densenet121(weights=weights)
+        num_ftrs = backbone.classifier.in_features
+        backbone.classifier = nn.Identity()
+        self.backbone = backbone
+        self.classifier = nn.Linear(num_ftrs, num_classes)
+
+    def forward(self, x):
+        feats = self.backbone(x)
+        return self.classifier(feats)
+
+
+def get_model():
+    return DenseNet121Classifier()
