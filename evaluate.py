@@ -7,14 +7,13 @@ import pandas as pd
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
     accuracy_score,
     precision_score,
     recall_score,
     f1_score,
     roc_auc_score,
     roc_curve,
+    multilabel_confusion_matrix
 )
 
 import config
@@ -49,10 +48,15 @@ df_test = df_test[
 ].reset_index(drop=True)
 logging.info(f"✅ {len(df_test)} échantillons de test chargés")
 
-# 📥 Construction du DataLoader de test
+# 📥 DataLoader de test
+# CheXpertDataset renvoie (img, label, mask)
 test_ds = CheXpertDataset(df_test, config.IMG_DIR, transform=val_transforms)
 test_loader = DataLoader(
-    test_ds, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS
+    test_ds,
+    batch_size=config.BATCH_SIZE,
+    shuffle=False,
+    num_workers=config.NUM_WORKERS,
+    pin_memory=True
 )
 logging.info(f"ℹ️  DataLoader de test prêt ({len(test_loader)} batches)")
 
@@ -65,88 +69,89 @@ model.load_state_dict(
 model.eval()
 logging.info("📦 Modèle chargé en mémoire")
 
-# 🔢 Prédictions
-all_preds, all_labels = [], []
+# 🔮 Prédictions
+all_preds, all_labels, all_masks = [], [], []
 logging.info("🔮 Prédictions en cours...")
 with torch.no_grad():
-    for imgs, labels in tqdm(test_loader, desc="Itération test"):
+    for imgs, labels, mask in tqdm(test_loader, desc="Itération test"):
         imgs = imgs.to(device)
         out = model(imgs)
         probs = torch.sigmoid(out).cpu().numpy()
         all_preds.append(probs)
         all_labels.append(labels.numpy())
+        all_masks.append(mask.numpy())
 logging.info("✅ Prédictions terminées")
 
+# Empiler résultats
 probs = np.vstack(all_preds)
-y_pred = probs >= 0.5
-y_true = np.vstack(all_labels) >= 0.5
+labels = np.vstack(all_labels)
+masks = np.vstack(all_masks).astype(bool)
 
-# 📝 Rapport de classification
-logging.info("📊 Rapport de classification")
-report = classification_report(
-    y_true, y_pred, target_names=config.CLASSES, zero_division=0
-)
+# 📊 Rapport par classe
+logging.info("📊 Rapport de classification par pathologie (labels valides)")
+report_lines = []
+report_lines.append(f"{'Classe':30s} Précision  Rappel  F1-score  Support")
+for idx, cls in enumerate(config.CLASSES):
+    mask_j = masks[:, idx]
+    if mask_j.sum() == 0:
+        continue
+    y_t = labels[:, idx][mask_j]
+    y_p = (probs[:, idx][mask_j] >= 0.5)
+    prec = precision_score(y_t, y_p, zero_division=0)
+    rec  = recall_score(y_t, y_p, zero_division=0)
+    f1   = f1_score(y_t, y_p, zero_division=0)
+    sup  = int(mask_j.sum())
+    report_lines.append(f"{cls:30s} {prec:>8.2f}   {rec:>5.2f}    {f1:>7.2f}   {sup:>7d}")
+report = "\n".join(report_lines)
 print(report)
 logging.info("\n" + report)
+
+# 📝 Metrics globales sur tous labels valides
+y_true_flat = labels[masks]
+y_pred_flat = (probs >= 0.5)[masks]
+global_acc  = accuracy_score(y_true_flat, y_pred_flat)
+macro_prec  = np.mean([precision_score(labels[:, i][masks[:, i]], (probs[:, i][masks[:, i]]>=0.5), zero_division=0)
+                        for i in range(len(config.CLASSES))])
+macro_rec   = np.mean([recall_score   (labels[:, i][masks[:, i]], (probs[:, i][masks[:, i]]>=0.5), zero_division=0)
+                        for i in range(len(config.CLASSES))])
+macro_f1    = np.mean([f1_score      (labels[:, i][masks[:, i]], (probs[:, i][masks[:, i]]>=0.5), zero_division=0)
+                        for i in range(len(config.CLASSES))])
 summary = (
-    f"Global Acc: {accuracy_score(y_true.flatten(), y_pred.flatten()):.4f} | "
-    f"Prec: {precision_score(y_true, y_pred, average='macro', zero_division=0):.4f} | "
-    f"Rec:  {recall_score(y_true, y_pred, average='macro', zero_division=0):.4f} | "
-    f"F1:   {f1_score(y_true, y_pred, average='macro', zero_division=0):.4f}"
+    f"Global Acc: {global_acc:.4f} | "
+    f"Prec: {macro_prec:.4f} | "
+    f"Rec:  {macro_rec:.4f} | "
+    f"F1:   {macro_f1:.4f}"
 )
 print(summary)
 logging.info(summary)
 
-# 📊 Matrice de confusion 14×14 annotée
-logging.info("🔢 Génération de la matrice de confusion")
-y_true_mc = np.argmax(y_true.astype(int), axis=1)
-y_pred_mc = np.argmax(probs, axis=1)
-cm = confusion_matrix(y_true_mc, y_pred_mc, labels=list(range(len(config.CLASSES))))
-
-plt.figure(figsize=(12, 10))
-plt.imshow(cm, interpolation="nearest", aspect="auto", cmap="Blues")
-plt.title("Matrice de confusion 14×14")
-plt.colorbar()
-ticks = np.arange(len(config.CLASSES))
-plt.xticks(ticks, config.CLASSES, rotation=90)
-plt.yticks(ticks, config.CLASSES)
-thresh = cm.max() / 2
-for i in range(cm.shape[0]):
-    for j in range(cm.shape[1]):
-        plt.text(
-            j,
-            i,
-            format(cm[i, j], "d"),
-            ha="center",
-            va="center",
-            color="white" if cm[i, j] > thresh else "black",
-        )
-plt.tight_layout()
-conf_path = os.path.join(FIGURES_DIR, "matrice_confusion_14x14.png")
-plt.savefig(conf_path)
-plt.close()
-logging.info(f"💾 Matrice de confusion sauvegardée: {conf_path}")
-
-# 📈 Courbes ROC & AUC sur un seul plot
-logging.info("📈 Génération des courbes ROC & calcul AUC")
-plt.figure(figsize=(10, 8))
+# 🔢 Confusion matrix 2×2 par classe
+logging.info("🔢 Generation des matrices de confusion 2×2 par classe")
+from sklearn.metrics import confusion_matrix as cm_fn
+# Calcul manuel par pathologie en respectant le mask
+cms = []
 for idx, cls in enumerate(config.CLASSES):
-    try:
-        auc = roc_auc_score(y_true[:, idx].astype(int), probs[:, idx])
-    except ValueError:
-        auc = float("nan")
-    fpr, tpr, _ = roc_curve(y_true[:, idx].astype(int), probs[:, idx])
-    plt.plot(fpr, tpr, label=f"{cls} (AUC={auc:.2f})")
-plt.plot([0, 1], [0, 1], "k--", label="Aléatoire")
-plt.title("Courbes ROC multi-classes")
-plt.xlabel("Taux de faux positifs")
-plt.ylabel("Taux de vrais positifs")
-plt.legend(loc="lower right", fontsize="small")
-plt.grid(True)
-plt.tight_layout()
-roc_path = os.path.join(FIGURES_DIR, "roc_auc_global.png")
-plt.savefig(roc_path)
-plt.close()
-logging.info(f"💾 Courbes ROC sauvegardées: {roc_path}")
+    mask_j = masks[:, idx]
+    if mask_j.sum() == 0:
+        cms.append(np.array([[0,0],[0,0]]))
+        continue
+    y_t = labels[:, idx][mask_j]
+    y_p = (probs[:, idx][mask_j] >= 0.5)
+    cm_i = cm_fn(y_t, y_p, labels=[0,1])  # [[TN, FP],[FN, TP]]
+    cms.append(cm_i)
 
+# Tracer un heatmap par classe
+import seaborn as sns
+fig, axes = plt.subplots(len(config.CLASSES), 1, figsize=(6, 3*len(config.CLASSES)))
+for i, (cls, cm_i) in enumerate(zip(config.CLASSES, cms)):
+    ax = axes[i]
+    sns.heatmap(cm_i, annot=True, fmt='d', ax=ax, cmap='Blues', cbar=False)
+    ax.set_xlabel('Pred')
+    ax.set_ylabel('True')
+    ax.set_title(f"{cls} [[TN, FP],[FN, TP]]")
+plt.tight_layout()
+conf2_path = os.path.join(FIGURES_DIR, "confusion_per_class.png")
+plt.savefig(conf2_path)
+plt.close()
+logging.info(f"💾 Matrices de confusion par classe sauvegardées: {conf2_path}")
 logging.info("🎉 Évaluation terminée !")
