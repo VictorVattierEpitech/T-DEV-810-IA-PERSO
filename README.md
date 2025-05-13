@@ -171,7 +171,7 @@ Cela permet de :
 
 ![alt text](./outputs_1/figures/ROC_AUC.png)
 
-### Résultats et métriques
+### Résultats et métriques : 
 
 | Classe                         | Précision | Rappel | F1-score | Support |
 |-------------------------------|-----------|--------|----------|---------|
