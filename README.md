@@ -167,5 +167,27 @@ Cela permet de :
 
 ## Evaluation
 
+![alt text](./outputs_1/figures/confusion_per_class.png)
 
-## Inférence
+![alt text](./outputs_1/figures/ROC_AUC.png)
+
+### Résultats et métriques
+
+| Classe                         | Précision | Rappel | F1-score | Support |
+|-------------------------------|-----------|--------|----------|---------|
+| No Finding                    | 🟢 0.99   | 🟢 1.00 | 🟢 1.00   | 3271    |
+| Enlarged Cardiomediastinum    | 🟢 0.75   | 🟠 0.56 | 🟠 0.64   | 4740    |
+| Cardiomegaly                  | 🟢 0.86   | 🟢 0.90 | 🟢 0.88   | 5692    |
+| Lung Opacity                  | 🟢 0.94   | 🟢 1.00 | 🟢 0.97   | 17023   |
+| Lung Lesion                   | 🟢 0.84   | 🟢 1.00 | 🟢 0.91   | 1593    |
+| Edema                         | 🟢 0.91   | 🟢 1.00 | 🟢 0.95   | 33547   |
+| Consolidation                 | 🟢 0.88   | 🟢 0.99 | 🟢 0.93   | 33547   |
+| Pneumonia                     | 🟢 0.99   | 🟢 1.00 | 🟢 0.99   | 33547   |
+| Atelectasis                   | 🔴 0.49   | 🔴 0.02 | 🔴 0.03   | 33547   |
+| Pneumothorax                  | 🟠 0.62   | 🟠 0.40 | 🟠 0.49   | 33547   |
+| Pleural Effusion              | 🟢 0.87   | 🟢 0.97 | 🟢 0.92   | 33547   |
+| Pleural Other                 | 🟢 0.86   | 🟢 1.00 | 🟢 0.93   | 629     |
+| Fracture                      | 🟢 0.77   | 🟢 0.99 | 🟢 0.87   | 1665    |
+| Support Devices               | 🟢 0.95   | 🟢 1.00 | 🟢 0.97   | 18340   |
+| **Moyenne globale (macro)**   | 🟢 **0.8370** | 🟢 **0.8449** | 🟢 **0.8199** | **-**   |
+
